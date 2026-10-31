@@ -1,0 +1,118 @@
+---
+- name: Require a supported Docker host operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+      - ansible_facts['distribution_release'] == 'trixie'
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+    fail_msg: This role supports Debian 13 Trixie on amd64 or arm64 only.
+
+- name: Read installed package facts
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Refuse to replace conflicting container packages automatically
+  ansible.builtin.assert:
+    that:
+      - >-
+        ['docker.io', 'docker-compose', 'docker-compose-v2', 'docker-doc',
+         'docker-buildx', 'podman-docker', 'containerd', 'runc']
+        | intersect(ansible_facts['packages'].keys() | list) | length == 0
+    fail_msg: Conflicting container packages are installed. Review migration manually before using this role.
+
+- name: Find existing APT source files
+  ansible.builtin.find:
+    paths: /etc/apt/sources.list.d
+    patterns:
+      - '*.list'
+      - '*.sources'
+    file_type: file
+  register: docker_host_source_files
+
+- name: Check the main APT source file
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list
+  register: docker_host_main_source
+
+- name: Read APT sources without logging their contents
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: >-
+    {{ (docker_host_source_files['files'] | map(attribute='path') | list)
+       + (['/etc/apt/sources.list'] if docker_host_main_source['stat']['exists'] else []) }}
+  register: docker_host_source_contents
+  no_log: true
+
+- name: Initialize conflicting Docker repository list
+  ansible.builtin.set_fact:
+    docker_host_conflicting_sources: []
+
+- name: Identify Docker repositories outside the managed source file
+  ansible.builtin.set_fact:
+    docker_host_conflicting_sources: "{{ docker_host_conflicting_sources + [item['source']] }}"
+  loop: "{{ docker_host_source_contents['results'] }}"
+  when:
+    - item['source'] != '/etc/apt/sources.list.d/docker.list'
+    - "'download.docker.com/linux/debian' in (item['content'] | b64decode)"
+  no_log: true
+
+- name: Refuse to create duplicate Docker repositories
+  ansible.builtin.assert:
+    that:
+      - docker_host_conflicting_sources | length == 0
+    fail_msg: >-
+      Docker sources already exist outside the managed docker.list file:
+      {{ docker_host_conflicting_sources | join(', ') }}.
+      Consolidate them manually before using this role.
+
+- name: Ensure HTTPS repository prerequisites are installed
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    fail_on_autoremove: true
+
+- name: Ensure the APT keyring directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ensure the Docker repository signing key is present
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: '0644'
+    force: false
+  notify: Refresh Docker repository metadata
+
+- name: Manage the Docker stable APT repository
+  ansible.builtin.template:
+    src: docker.list.j2
+    dest: /etc/apt/sources.list.d/docker.list
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Refresh Docker repository metadata
+
+- name: Refresh changed repository metadata before installing packages
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure Docker packages are installed without requesting upgrades
+  ansible.builtin.apt:
+    name: "{{ docker_host_packages }}"
+    state: present
+    fail_on_autoremove: true
+
+- name: Ensure Docker is enabled and running
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started

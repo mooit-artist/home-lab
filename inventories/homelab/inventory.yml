@@ -1,0 +1,7 @@
+---
+all:
+  children:
+    docker_hosts:
+      hosts:
+        # Connection details are supplied outside Git by the control machine.
+        docker-test-01: {}

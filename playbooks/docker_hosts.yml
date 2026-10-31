@@ -1,0 +1,7 @@
+---
+- name: Configure Docker hosts
+  hosts: docker_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - docker_host

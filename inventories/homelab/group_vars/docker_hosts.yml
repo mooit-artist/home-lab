@@ -1,0 +1,3 @@
+---
+# Non-secret Docker-host configuration; host_vars holds per-host overrides.
+{}

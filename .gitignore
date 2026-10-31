@@ -1,0 +1,56 @@
+# Local secrets, including locally kept encrypted Vault data.
+.env
+.env.*
+!.env.example
+secrets/
+.secrets/
+vault/
+vault.yml
+vault.yaml
+vault_*.yml
+vault_*.yaml
+*.vault.yml
+*.vault.yaml
+.vault_pass*
+.vault-password*
+vault-password*
+vault_password*
+.ansible-vault-password*
+.ssh/
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+*.pem
+*.p12
+*.pfx
+*.ppk
+*.kdbx
+
+# Local overrides and generated Ansible artifacts.
+ansible.local.cfg
+*.local.yml
+*.local.yaml
+*.retry
+.ansible/
+.cache/
+
+# Python environments and caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor, macOS, backup, and temporary files.
+.vscode/
+.idea/
+.DS_Store
+._*
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.temp
+*.log

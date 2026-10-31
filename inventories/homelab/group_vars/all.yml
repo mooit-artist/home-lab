@@ -1,0 +1,3 @@
+---
+# Non-secret configuration shared by every host in this inventory.
+{}
