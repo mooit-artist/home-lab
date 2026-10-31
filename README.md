@@ -75,6 +75,7 @@ homelab-ansible/
         │   └── ssh_config.j2
         └── files/
             ├── prepare-secrets.sh
+            ├── create-backup-snapshot.sh
             └── requirements.txt
 ```
 
@@ -609,6 +610,54 @@ data directories, or regenerate secrets as troubleshooting shortcuts.
 Disk sizing, retention, HTTPS, backup automation, and external runners are
 future approved stages.
 
+##### Manual backup preparation
+
+Use a dedicated non-admin NAS file-service account with Editor access only to
+the backup share, not Owner access. Verify SMB write/read access from the Mac
+using that account. Keep guest access disabled. Daily NAS snapshots and SMB
+Trash provide deletion recovery, not an independent backup. Keep NAS addresses,
+credentials, and mounted destination paths outside Git.
+
+The approved backup approach uses passphrase-encrypted `age` archives. Install
+`age` on the Mac with `brew install age` and store a unique encryption passphrase
+in a password manager, separately from NAS and Semaphore credentials. Do not
+put it in commands, environment variables, Git, or chat.
+
+Before taking a snapshot, verify no Semaphore tasks are running. Copy the
+non-secret helper from the repository root, then run it on the controller:
+
+```sh
+scp roles/semaphore_controller/files/create-backup-snapshot.sh \
+  semaphore-01:~/create-semaphore-backup-snapshot.sh
+ssh -t semaphore-01 'sudo bash ~/create-semaphore-backup-snapshot.sh'
+```
+
+The helper uses the default `/opt/semaphore` deployment path. It briefly stops
+only Semaphore, archives the entire deployment directory with numeric ownership
+metadata, validates the gzip/tar structure, and starts the same container.
+Its exit trap attempts restart if snapshot creation fails. On restart failure,
+recover the controller explicitly; do not proceed as though backup succeeded.
+After startup, verify health and HTTP readiness again.
+
+The helper prints one unpredictable `/var/tmp/semaphore-backup.*` snapshot path.
+This temporary archive contains plaintext secrets, is mode `0600`, and becomes
+owned by the sudo operator for SSH transfer. Never upload it unencrypted, print
+its contents, or place it in Git. Encrypt it on the Mac using `age --passphrase`
+with private terminal prompts. Verify decryption and archive integrity before
+copying only the encrypted archive to the NAS. Remove the exact temporary
+controller snapshot after successful verification; never use wildcard cleanup.
+The operator completed a consistent snapshot and passphrase encryption on the
+Mac. Streamed decryption produced the exact original snapshot SHA-256 checksum.
+Only the encrypted archive was copied to the NAS; byte comparison and SHA-256
+checks confirmed it matched the local encrypted copy. The specific temporary
+plaintext snapshot was then removed from the controller. The local encrypted
+copy was retained, and controller health and HTTP 200 were verified afterward.
+The dedicated NAS account's SMB write/read access was tested. The share was
+configured with Editor access for that account, SMB Trash, and daily snapshots
+with a limit of 16; scheduled snapshot execution remains unverified.
+Isolated application restoration and decryption directly from the NAS copy
+remain pending. These checks do not yet prove recovery of stored credentials.
+
 The image tag and matching upstream startup behavior were checked, and the
 Docker collection was installed locally. All three playbook syntax checks and
 all twelve project YAML files passed. Local tests exercised supported and
@@ -690,6 +739,34 @@ usable after a process/container restart. It does not verify container
 recreation, VM reboot, or backup/restore.
 No new commit/push was made in this stage; the runner used the previously
 published Docker role, not the uncommitted controller-bootstrap changes.
+
+#### Real Docker baseline execution from Semaphore
+
+The operator copied the dry-run template into a separate TASK template named
+`Docker test - apply`, retaining the repository, playbook, `docker-test`
+inventory, and `docker-test-01` limit. Its CLI arguments contain `--diff` but
+not `--check`. Parallel tasks, automatic runs, and runtime override prompts
+remain disabled. The original dry-run template is unchanged.
+
+The first attempts failed without reported changes: APT returned permission
+denied when privilege escalation targeted the SSH login user, and an inventory
+edit to use root for SSH caused authentication failure. Keep the inventory's
+`ansible_user` set to the approved non-root SSH login. Separately, the
+`docker-test-sudo` login/password credential must target `root` and contain the
+SSH login user's sudo password, not a root password. When editing this protected
+credential, check **Override**, re-enter both fields privately, and save.
+Disabled blank credential fields conceal saved values; they do not show that
+the credential is empty. This configuration does not enable root SSH login.
+
+After correcting the saved sudo credential, the operator's first successful
+apply run returned `ok=15`, `changed=0`, `unreachable=0`, `failed=0`,
+`skipped=1`, `rescued=0`, and `ignored=0`. It verified real privileged package
+and service checks against the already-configured test host; no workload was
+deployed. Repeat apply task #8 returned the same recap, confirming idempotence
+through Semaphore. Independent key-only SSH checks afterward confirmed Docker
+active and enabled, Engine 29.9.2, Compose 5.6.1, and no running containers.
+Earlier check-mode success alone did not verify root privileges for actual APT
+operations. Fresh-host installation and arm64 runtime testing remain unverified.
 
 Work in small, approved stages and verify each stage before moving on:
 
