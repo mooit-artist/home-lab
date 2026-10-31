@@ -1,0 +1,7 @@
+---
+- name: Deploy the Semaphore controller
+  hosts: semaphore_controllers
+  become: true
+  gather_facts: true
+  roles:
+    - semaphore_controller

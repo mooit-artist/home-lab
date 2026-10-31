@@ -1,0 +1,39 @@
+services:
+  semaphore:
+    image: {{ semaphore_controller_image | to_json }}
+    user: "1001:0"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:{{ semaphore_controller_port }}:3000"
+    environment:
+      SEMAPHORE_DB_DIALECT: sqlite
+      SEMAPHORE_DB_PATH: /var/lib/semaphore
+      SEMAPHORE_DB_HOST: /var/lib/semaphore/database.sqlite
+      SEMAPHORE_CONFIG_PATH: /etc/semaphore
+      SEMAPHORE_PLAYBOOK_PATH: /tmp/semaphore
+      SEMAPHORE_ADMIN: {{ semaphore_controller_admin_username | to_json }}
+      SEMAPHORE_ADMIN_NAME: {{ semaphore_controller_admin_name | to_json }}
+      SEMAPHORE_ADMIN_EMAIL: {{ semaphore_controller_admin_email | to_json }}
+      SEMAPHORE_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION_FILE: /run/secrets/access_key_encryption
+      ANSIBLE_HOST_KEY_CHECKING: "True"
+      TZ: UTC
+    volumes:
+      - ./config:/etc/semaphore
+      - ./data:/var/lib/semaphore
+      - ./known_hosts:/etc/semaphore/known_hosts:ro
+      - ./ssh_config:/etc/ssh/ssh_config.d/semaphore.conf:ro
+    secrets:
+      - admin_password
+      - access_key_encryption
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+secrets:
+  admin_password:
+    file: ./secrets/admin_password
+  access_key_encryption:
+    file: ./secrets/access_key_encryption

@@ -7,13 +7,17 @@ intended playbook runner, and local development takes place in VS Code on macOS.
 
 ## Current scope and assumptions
 
-This project contains a Docker-host management role and one approved test alias,
-`docker-test-01`. The Docker playbook gathers facts and invokes the role with
+This project contains Docker-host management and Semaphore-controller roles,
+with approved inventory aliases `docker-test-01` and `semaphore-01`.
+The Docker playbook gathers facts and invokes the Docker role with
 sudo. It now performs configuration tasks; it is no longer a no-op scaffold.
 Live check-mode, real execution, repeat-run idempotence, and post-run Docker
 health checks passed on the existing Debian amd64 test host. Fresh-host
 installation and arm64 runtime testing remain unverified. No containerized
-services are deployed.
+workload services are deployed. Semaphore deployment, health checks, repeat-run
+idempotence, and runner integration passed. After a container restart, health
+and a repeat runner dry run verified saved configuration and credential
+persistence. Container recreation, VM reboot, and backup/restore remain untested.
 
 - Ansible will manage Linux guest VMs, not XCP-ng hypervisors.
 - VM provisioning and XCP-ng API integration are out of scope initially.
@@ -49,36 +53,48 @@ homelab-ansible/
 │           └── .gitkeep
 ├── playbooks/
 │   ├── site.yml
-│   └── docker_hosts.yml
+│   ├── docker_hosts.yml
+│   └── semaphore.yml
 └── roles/
-    └── docker_host/
-        ├── defaults/
-        │   └── main.yml
-        ├── tasks/
-        │   └── main.yml
-        ├── handlers/
-        │   └── main.yml
+    ├── docker_host/
+    │   ├── defaults/
+    │   │   └── main.yml
+    │   ├── tasks/
+    │   │   └── main.yml
+    │   ├── handlers/
+    │   │   └── main.yml
+    │   ├── templates/
+    │   │   └── docker.list.j2
+    │   └── files/
+    │       └── .gitkeep
+    └── semaphore_controller/
+        ├── defaults/main.yml
+        ├── tasks/main.yml
         ├── templates/
-        │   └── docker.list.j2
+        │   ├── compose.yml.j2
+        │   └── ssh_config.j2
         └── files/
-            └── .gitkeep
+            ├── prepare-secrets.sh
+            └── requirements.txt
 ```
 
 | Path | Purpose |
 | --- | --- |
-| [inventories/homelab/inventory.yml](inventories/homelab/inventory.yml) | Hosts and group membership. Contains the test alias `docker-test-01` in `docker_hosts`, without connection details. |
+| [inventories/homelab/inventory.yml](inventories/homelab/inventory.yml) | Aliases only: `docker-test-01` in `docker_hosts`, and `semaphore-01` in its `semaphore_controllers` subgroup. No connection details. |
 | [group_vars/all.yml](inventories/homelab/group_vars/all.yml) | Non-secret settings shared by all hosts in this inventory. |
 | [group_vars/docker_hosts.yml](inventories/homelab/group_vars/docker_hosts.yml) | Non-secret settings shared by Docker hosts. |
 | [host_vars/](inventories/homelab/host_vars/) | Per-host overrides. A file's basename must match its inventory host identifier. Add files only when host details are explicitly supplied. |
 | [playbooks/site.yml](playbooks/site.yml) | Top-level entry point importing focused playbooks. |
 | [playbooks/docker_hosts.yml](playbooks/docker_hosts.yml) | Targets `docker_hosts` and invokes the reusable `docker_host` role. |
+| [playbooks/semaphore.yml](playbooks/semaphore.yml) | Explicit controller bootstrap/deployment entry point. Intentionally not imported by `site.yml` to avoid unintended controller changes or self-management. |
+| [roles/semaphore_controller/](roles/semaphore_controller/) | Pinned Compose deployment, persistent SQLite/config storage, protected secret-file preflight, host-key trust, and loopback health checks. |
 | [roles/docker_host/defaults/main.yml](roles/docker_host/defaults/main.yml) | Low-precedence, overridable, non-secret role defaults. |
 | [roles/docker_host/tasks/main.yml](roles/docker_host/tasks/main.yml) | OS and migration guards, repository trust, package presence, and Docker service state. |
 | [roles/docker_host/handlers/main.yml](roles/docker_host/handlers/main.yml) | Refreshes APT metadata when the managed repository or signing key changes. Does not restart Docker. |
 | [roles/docker_host/templates/](roles/docker_host/templates/) | Role-owned Jinja2 templates. Secret values must come from protected runtime variables, not template source. |
 | [roles/docker_host/files/](roles/docker_host/files/) | Role-owned static, non-secret files. Never place private keys or credentials here. |
-| [ansible.cfg](ansible.cfg) | Default inventory and role paths, enabled SSH host-key checking, and disabled retry files. |
-| [requirements.yml](requirements.yml) | Collection and external-role dependencies. Both lists are initially empty; pin approved dependencies when adding them. |
+| [ansible.cfg](ansible.cfg) | Default inventory, role and project-local collection paths, enabled SSH host-key checking, and disabled retry files. |
+| [requirements.yml](requirements.yml) | Pins `community.docker` 5.4.0 for Compose management. External roles remain empty. |
 | [.gitignore](.gitignore) | Local secrets, overrides, generated files, Python environments, editor metadata, macOS files, and temporary-file exclusions. |
 | [README.md](README.md) | Project design, security policy, execution guidance, and incremental implementation process. |
 
@@ -161,10 +177,12 @@ From the repository root, create a new environment with that interpreter:
 python3.13 -m venv .venv
 . .venv/bin/activate
 python -m pip install 'ansible-core==2.21.5'
+ansible-galaxy collection install -r requirements.yml -p .ansible/collections
 ansible --version
 ansible-inventory -i inventories/homelab/inventory.yml --graph
 ansible-playbook playbooks/site.yml --syntax-check
 ansible-playbook playbooks/docker_hosts.yml --syntax-check
+ansible-playbook playbooks/semaphore.yml --syntax-check
 ansible-playbook playbooks/site.yml --list-tasks
 ```
 
@@ -295,14 +313,16 @@ These results informed the approved Docker role scope below.
 Because DHCP addresses may change, arrange a reservation outside Git or update
 the local SSH mapping after independently verifying the VM's identity.
 
-When dependencies are added to `requirements.yml`, install them on the control
-machine or runner before validation and execution:
+Install dependencies from `requirements.yml` on the control machine or runner
+before validation and execution:
 
 ```sh
-ansible-galaxy install -r requirements.yml
+ansible-galaxy collection install -r requirements.yml -p .ansible/collections
 ```
 
-No Galaxy dependencies need installation for the initial empty lists.
+The initial scaffold needed none; controller deployment now requires the
+pinned Docker collection. `ansible.cfg` uses the ignored project-local
+`.ansible/collections` directory, including the collection's dependencies.
 
 After hosts and operational tasks are approved, establish verified SSH host
 keys in the control machine's `known_hosts`; do not disable host-key checking.
@@ -444,6 +464,232 @@ separately from configuration changes. Finally verify `docker --version`,
 Do not deploy a sample container as part of this stage.
 
 ## Incremental implementation
+
+### Semaphore controller bootstrap
+
+The controller is a separate Debian 13 VM cloned from the Docker golden image:
+2 vCPUs, 2 GiB RAM, and a 20 GiB disk. Console checks confirmed new machine-ID
+initialization and fresh SSH host keys. Key-only SSH access and the ED25519
+fingerprint were verified. Its address, real hostname, SSH username, and key
+path live only in the Mac's `~/.ssh/config` entry for `semaphore-01`.
+Its guest hostname still comes from the template; renaming it is deferred.
+
+Approved design:
+
+- Pinned `semaphoreui/semaphore:v2.19.17`, not `latest`.
+- A single SQLite-backed application container. Configuration and database
+  persist in `/opt/semaphore/config` and `/opt/semaphore/data` on the VM.
+- A protected initial admin password and a random 32-byte base64 access-key
+  encryption key in `/opt/semaphore/secrets`, never supplied through Git,
+  command-line passwords, or ordinary inventory variables.
+- Compose file-backed secrets with Semaphore's supported `_FILE` variables.
+  These are local bind-mounted files, not an encrypted Swarm secret store.
+  Docker/root administrators can still access them, and Semaphore's generated
+  configuration contains sensitive values. Protect and back up config, database,
+  and secrets together using encrypted storage outside Git.
+- Container UID 1001/GID 0, matching the official image; writable persistence
+  directories use `0700`, and secrets use UID 1001 with `0400`. The containing
+  secret directory is root-owned `0700`.
+- Web port bound only to `127.0.0.1` on the VM. Use an SSH tunnel rather than
+  sending credentials over plain HTTP on the LAN. No reverse proxy, public
+  exposure, firewall changes, or Docker socket mount.
+- The image's bundled SSH configuration disables host-key checking. The role
+  replaces that file with strict checking and installs an operator-supplied
+  trusted `known_hosts` file. Ansible host-key checking is also enabled.
+- The official image supports startup Python requirements. The role supplies
+  compatible pinned `ansible==14.5.0` and `ansible-core==2.21.5` requirements
+  to align Core with the Mac. Startup needs network access to download packages;
+  verify `pip check` and `ansible --version` inside the running container.
+- Health checks wait for an HTTP 200 response. First startup can take several
+  minutes due to image pulls and Python dependency installation.
+
+Controller settings use the `semaphore_controller_` prefix in
+[role defaults](roles/semaphore_controller/defaults/main.yml). Override only
+non-secret settings in inventory. The secret helper below uses the default
+`/opt/semaphore` path; if that path is overridden, prepare equivalent files
+there manually with the documented ownership and permissions.
+
+#### 1. Prepare secrets on the controller
+
+From the Mac, copy the reviewed non-secret helper:
+
+```sh
+scp roles/semaphore_controller/files/prepare-secrets.sh \
+  semaphore-01:~/prepare-semaphore-secrets.sh
+ssh semaphore-01
+sudo bash ~/prepare-semaphore-secrets.sh
+```
+
+Choose a unique admin password of at least 20 characters and save it in your
+password manager. The helper prompts without echoing and generates the
+encryption key locally; it refuses to overwrite existing files. Do not paste
+passwords or print these files. If creation is interrupted, inspect file
+metadata and resolve partial preparation manually; never replace an established
+encryption key to bypass a startup problem.
+
+Exit the VM's SSH session to return to the Mac. The helper is not run
+automatically by Ansible. Its requirements are checked before any deployment.
+Manage these files through Vault or an external secret manager later, without
+changing their values unexpectedly.
+
+#### 2. Validate and deploy from the Mac
+
+Supply your independently verified local host-key file as a runtime input,
+outside Git. For initial bootstrap, the Mac's `~/.ssh/known_hosts` is suitable
+provided all included entries are trusted. It is copied to the controller,
+not committed. Prefer a dedicated file containing only required runner targets
+as the lab grows. Adding a repository via SSH later also requires independently
+verified GitHub host keys; HTTPS cloning avoids that separate SSH requirement.
+
+```sh
+. .venv/bin/activate
+ansible-galaxy collection install -r requirements.yml -p .ansible/collections
+ansible-playbook playbooks/semaphore.yml --syntax-check
+ansible-playbook playbooks/semaphore.yml --limit semaphore-01 \
+  --check --diff --ask-become-pass \
+  -e "semaphore_controller_known_hosts_file=$HOME/.ssh/known_hosts" \
+  --ssh-extra-args='-o BatchMode=yes'
+```
+
+Check mode cannot fully simulate a new Compose project: the generated files and
+directories do not yet exist on a fresh VM, so the Compose task can fail after
+earlier predicted changes. Review that limitation rather than bypassing secret
+or host-key guards. After reviewing the output and approving actual deployment,
+repeat the command without `--check --diff`.
+
+Do not add the controller bootstrap playbook to `site.yml` yet. The controller
+is a Docker-host subgroup, so `docker_hosts.yml` and `site.yml` can manage its
+Docker baseline; use `--limit docker-test-01` for the existing test workflow.
+Run `semaphore.yml` explicitly from the Mac to keep controller bootstrap
+separate and avoid accidentally changing the controller from its own runner.
+
+#### 3. Verify and access the interface
+
+After a successful deployment, check from the controller:
+
+```sh
+cd /opt/semaphore
+sudo docker compose -p semaphore -f compose.yml ps
+sudo docker compose -p semaphore -f compose.yml exec -T semaphore ansible --version
+sudo docker compose -p semaphore -f compose.yml exec -T semaphore pip3 check
+curl --fail --silent --output /dev/null http://127.0.0.1:3000/
+```
+
+Repeat the deployment from the Mac to test idempotence. Avoid dumping generated
+config, container environment, secret files, or unredacted startup logs.
+Updates to startup requirements need a deliberate container restart or recreation before
+they take effect; changing files alone does not restart the process.
+
+In a separate Mac terminal, keep this tunnel running:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:3000:127.0.0.1:3000 semaphore-01
+```
+
+Open `http://127.0.0.1:3000` in the Mac browser and log in as `admin` with the
+password you chose locally. If local port 3000 is occupied, use 3001 on the
+left side and open that port instead. Closing the tunnel terminal disconnects
+browser access, not Semaphore. Verify no VM LAN port is published.
+
+After the interface and persistence are verified, configure GitHub read access,
+a separate runner SSH credential (do not copy the Mac's private key into Git),
+the test inventory, sudo credential, and a limited Docker task template.
+Those are a subsequent stage, not automatically created by this role.
+
+#### Recovery and verification boundaries
+
+Keep the access-key encryption key stable: losing it can make stored runner
+credentials unrecoverable. Initial admin environment inputs are bootstrap
+settings, not a guaranteed mechanism for resetting an existing account.
+Back up the database, configuration, and secret files together while Semaphore
+is stopped, or use a SQLite-consistent backup method. Test restoration before
+depending on the controller. Do not use `docker compose down -v`, delete the
+data directories, or regenerate secrets as troubleshooting shortcuts.
+Disk sizing, retention, HTTPS, backup automation, and external runners are
+future approved stages.
+
+The image tag and matching upstream startup behavior were checked, and the
+Docker collection was installed locally. All three playbook syntax checks and
+all twelve project YAML files passed. Local tests exercised supported and
+unsupported OS settings, missing trust inputs, unsafe paths, unpinned image
+tags, and missing/empty/insecure secret metadata. The rendered Compose project
+passed the controller's actual `docker compose config --quiet` validation;
+tests verified loopback binding, SQLite persistence paths, `_FILE` inputs,
+strict SSH checking, and absence of a Docker socket mount.
+The operator confirmed successful on-VM secret preparation. The subsequent
+dry run passed secret and deployment preflight checks and predicted five changed
+tasks, then stopped at Compose because the simulated `compose.yml` was not
+actually written (`ok=12`, `changed=5`, `unreachable=0`, `failed=1`, `skipped=1`).
+This is the documented fresh-project check-mode limitation, not a successful
+full dry run. The UID 1001 lookup warning reflects the container's numeric UID
+not having a named host account; the role intentionally uses numeric ownership.
+Secret values were not supplied to the assistant.
+The subsequent real deployment succeeded with `ok=15`, `changed=6`,
+`unreachable=0`, and `failed=0`. Independent read-only checks confirmed a healthy
+container, loopback-only port publication, HTTP 200, Ansible Core 2.21.5 running
+on container Python 3.12.15, no broken Python requirements, and effective strict
+SSH checking using `/etc/semaphore/known_hosts`. The image's virtual-environment
+directory retains its original Ansible distribution version in its name; the
+running Core version was verified directly.
+The operator subsequently reached the authenticated New Project page through
+the Mac's SSH tunnel, confirming browser access and admin login. For the initial
+project, use name `Homelab`, maximum parallel tasks `1`, no Telegram Chat ID,
+and alerts disabled. Use Create, not Create Demo Project, to avoid unrelated
+sample configuration.
+The operator created the `Homelab` project and reached its empty dashboard.
+Next configure private GitHub read access in Key Store, then the repository.
+Prefer a dedicated expiring fine-grained GitHub token restricted to
+`homelab-ansible` with repository Contents read-only permission for HTTPS cloning.
+Enter it directly in Semaphore's credential form; never paste it into chat,
+inventory, repository URLs, or screenshots. GitHub clone credentials and the
+runner's VM SSH/sudo credentials are separate.
+
+The operator saved the GitHub credential as `github-homelab-readonly` and added
+the HTTPS repository on branch `main`; subsequent runner tasks verified cloning.
+A separate passphrase-protected Ed25519 runner key was generated outside Git
+and its public key installed on the test host. Independent SSH authentication
+with alias configuration bypassed and password authentication disabled returned
+`runner-key-login-ok`. When using `ssh-copy-id`, bypass local alias identity
+settings with `-F /dev/null` to prevent the existing Mac management key from
+making the new key appear already installed.
+
+Create the Semaphore LOCAL SSH credential `docker-test-ssh` using the test
+host's approved SSH username, the runner key passphrase, and the complete
+runner private key. Transfer the key directly from the local file to the
+Semaphore form using the clipboard; do not display it in a terminal, paste
+it into chat, or include it in screenshots. Clear the clipboard afterward,
+and account for any clipboard-history or synchronization tools. Do not reuse
+the Mac management private key. Saving the credential is not proof of runner
+connectivity; a limited Semaphore task must verify it later.
+
+The operator saved separate SSH and sudo credentials and a Semaphore Static
+YAML inventory named `docker-test`, containing only `docker-test-01` in
+`docker_hosts`. Its connection variables are stored in Semaphore, not Git.
+The TASK template `Docker test - dry run` uses `playbooks/docker_hosts.yml`,
+repository branch `main`, that inventory, limit `docker-test-01`, and separate
+`--check` and `--diff` CLI arguments. Parallel tasks, automatic runs, and
+runtime argument/inventory prompts are disabled.
+
+Semaphore task #1 cloned GitHub successfully but stopped before Ansible because
+the SSH credential lacked a usable key passphrase. The operator replaced the
+complete credential through its override controls, including the runner key
+passphrase, without removing private-key encryption.
+Task #2 succeeded with `ok=15`, `changed=0`, `unreachable=0`, `failed=0`, and
+`skipped=1`, verifying the limited runner workflow, GitHub cloning, SSH, sudo,
+and Docker playbook check mode. This is not a real deployment run from Semaphore.
+The operator's controller repeat run passed with `ok=15`, `changed=0`,
+`unreachable=0`, `failed=0`, and `skipped=0`, confirming deployment idempotence.
+The operator restarted only the Semaphore container, preserving its mounted
+data. After restart, independent checks confirmed a healthy container, HTTP 200,
+and loopback-only port binding. The operator then reran the saved dry-run
+template successfully with `ok=15`, `changed=0`, `unreachable=0`, `failed=0`,
+`skipped=1`, `rescued=0`, and `ignored=0`. This verifies that the saved project,
+repository, inventory, template, and encrypted runner credentials remained
+usable after a process/container restart. It does not verify container
+recreation, VM reboot, or backup/restore.
+No new commit/push was made in this stage; the runner used the previously
+published Docker role, not the uncommitted controller-bootstrap changes.
 
 Work in small, approved stages and verify each stage before moving on:
 

@@ -1,0 +1,9 @@
+---
+semaphore_controller_image: semaphoreui/semaphore:v2.19.17
+semaphore_controller_path: /opt/semaphore
+semaphore_controller_port: 3000
+semaphore_controller_admin_username: admin
+semaphore_controller_admin_name: Semaphore Admin
+semaphore_controller_admin_email: admin@localhost
+# Supply a trusted control-node file outside Git when bootstrapping the runner.
+semaphore_controller_known_hosts_file: ''

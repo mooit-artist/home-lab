@@ -1,0 +1,126 @@
+---
+- name: Require the supported controller operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+    fail_msg: The controller role initially supports Debian 13 only.
+
+- name: Require a trusted host-key source and valid deployment settings
+  ansible.builtin.assert:
+    that:
+      - semaphore_controller_known_hosts_file | length > 0
+      - semaphore_controller_path is match('^/[A-Za-z0-9_/-]+$')
+      - semaphore_controller_path not in ['/', '/opt', '/etc', '/var', '/home']
+      - semaphore_controller_port | int > 0
+      - semaphore_controller_port | int < 65536
+      - semaphore_controller_image is match('^semaphoreui/semaphore:v[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: Supply a trusted external known_hosts file and valid absolute deployment settings with a pinned image tag.
+
+- name: Verify the Docker daemon is running
+  ansible.builtin.command: systemctl is-active docker
+  changed_when: false
+
+- name: Inspect operator-managed secret files
+  ansible.builtin.stat:
+    path: "{{ semaphore_controller_path }}/secrets/{{ item }}"
+    get_checksum: false
+    get_mime: false
+  loop:
+    - admin_password
+    - access_key_encryption
+  register: semaphore_controller_secret_files
+
+- name: Require protected nonempty secrets before deployment
+  ansible.builtin.assert:
+    that:
+      - item['stat']['exists']
+      - item['stat']['isreg'] | default(false)
+      - not (item['stat']['islnk'] | default(false))
+      - item['stat']['uid'] | default(-1) == 1001
+      - item['stat']['mode'] | default('') == '0400'
+      - item['stat']['size'] | default(0) > 0
+    fail_msg: Prepare nonempty admin_password and access_key_encryption files owned by UID 1001 with mode 0400, outside Git, as documented.
+  loop: "{{ semaphore_controller_secret_files['results'] }}"
+
+- name: Ensure the deployment directory exists
+  ansible.builtin.file:
+    path: "{{ semaphore_controller_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Protect the operator-managed secret directory
+  ansible.builtin.file:
+    path: "{{ semaphore_controller_path }}/secrets"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Ensure persistent application directories exist
+  ansible.builtin.file:
+    path: "{{ semaphore_controller_path }}/{{ item }}"
+    state: directory
+    owner: '1001'
+    group: '0'
+    mode: '0700'
+  loop:
+    - config
+    - data
+
+- name: Install verified host keys for the runner
+  ansible.builtin.copy:
+    src: "{{ semaphore_controller_known_hosts_file }}"
+    dest: "{{ semaphore_controller_path }}/known_hosts"
+    owner: root
+    group: root
+    mode: '0644'
+  diff: false
+  no_log: true
+
+- name: Enforce host-key checking in the container
+  ansible.builtin.template:
+    src: ssh_config.j2
+    dest: "{{ semaphore_controller_path }}/ssh_config"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install the pinned Ansible control dependency
+  ansible.builtin.copy:
+    src: requirements.txt
+    dest: "{{ semaphore_controller_path }}/config/requirements.txt"
+    owner: '1001'
+    group: '0'
+    mode: '0600'
+
+- name: Render the Semaphore Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ semaphore_controller_path }}/compose.yml"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Start the Semaphore Compose project
+  community.docker.docker_compose_v2:
+    project_src: "{{ semaphore_controller_path }}"
+    project_name: semaphore
+    files:
+      - compose.yml
+    state: present
+    pull: missing
+    wait: true
+    wait_timeout: 600
+
+- name: Verify the loopback web endpoint responds
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ semaphore_controller_port }}/"
+    status_code: 200
+  register: semaphore_controller_response
+  until: semaphore_controller_response['status'] | default(0) == 200
+  retries: 12
+  delay: 5
+  when: not ansible_check_mode

@@ -5,3 +5,7 @@ all:
       hosts:
         # Connection details are supplied outside Git by the control machine.
         docker-test-01: {}
+      children:
+        semaphore_controllers:
+          hosts:
+            semaphore-01: {}
