@@ -1,0 +1,44 @@
+---
+- name: Validate the Compose project inputs
+  ansible.builtin.assert:
+    that:
+      - docker_compose_service_project_name is match('^[a-z0-9][a-z0-9_-]*$')
+      - docker_compose_service_project_src is match('^/opt/[A-Za-z0-9][A-Za-z0-9._/-]*$')
+      - "'..' not in docker_compose_service_project_src.split('/')"
+      - "'.' not in docker_compose_service_project_src.split('/')"
+      - not docker_compose_service_project_src.endswith('/')
+      - docker_compose_service_config is mapping
+      - docker_compose_service_config['services'] is defined
+      - docker_compose_service_config['services'] is mapping
+      - docker_compose_service_config['services'] | length > 0
+      - docker_compose_service_state in ['present', 'absent']
+      - docker_compose_service_wait_timeout | int > 0
+    fail_msg: >-
+      Provide a valid project name, absolute project path, non-empty Compose
+      services mapping, supported state, and positive health wait timeout.
+
+- name: Ensure the Compose project directory exists
+  ansible.builtin.file:
+    path: "{{ docker_compose_service_project_src }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Render the Compose project configuration
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ docker_compose_service_project_src }}/compose.yml"
+    owner: root
+    group: root
+    mode: '0640'
+
+- name: Reconcile the Compose project
+  community.docker.docker_compose_v2:
+    project_name: "{{ docker_compose_service_project_name }}"
+    project_src: "{{ docker_compose_service_project_src }}"
+    state: "{{ docker_compose_service_state }}"
+    pull: missing
+    remove_orphans: false
+    wait: "{{ docker_compose_service_state == 'present' }}"
+    wait_timeout: "{{ docker_compose_service_wait_timeout | int }}"

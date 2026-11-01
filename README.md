@@ -5,6 +5,18 @@ running on XCP-ng as Docker hosts and, later, deploying containerized homelab
 services. GitHub is the intended source-control platform, Semaphore is the
 intended playbook runner, and local development takes place in VS Code on macOS.
 
+## Capabilities
+
+- Configure Docker on Debian 13 guest VMs (amd64 and arm64).
+- Deploy and operate a Semaphore controller with persistent storage and
+  protected secrets.
+- Manage individual Docker Compose projects through a reusable role. A
+  test-only smoke playbook is available, but no workload service has been
+  deployed.
+
+VM provisioning and XCP-ng hypervisor management are outside the project's
+scope.
+
 ## Current scope and assumptions
 
 This project contains Docker-host management and Semaphore-controller roles,
@@ -30,7 +42,7 @@ persistence. Container recreation, VM reboot, and backup/restore remain untested
 - Docker host management and service deployment are separate stages; deployment
   of any containerized service requires its own approval.
 - Source control uses the private GitHub repository
-  [mooit-artist/homelab-ansible](https://github.com/mooit-artist/homelab-ansible).
+  [mooit-artist/home-lab](https://github.com/mooit-artist/home-lab).
   Initial publication preserves its existing initial commit.
 
 No real infrastructure addresses, hostnames, or credentials are included.
@@ -54,7 +66,8 @@ homelab-ansible/
 ├── playbooks/
 │   ├── site.yml
 │   ├── docker_hosts.yml
-│   └── semaphore.yml
+│   ├── semaphore.yml
+│   └── service_smoke_test.yml
 └── roles/
     ├── docker_host/
     │   ├── defaults/
@@ -67,6 +80,10 @@ homelab-ansible/
     │   │   └── docker.list.j2
     │   └── files/
     │       └── .gitkeep
+    ├── docker_compose_service/
+    │   ├── defaults/main.yml
+    │   ├── tasks/main.yml
+    │   └── templates/compose.yml.j2
     └── semaphore_controller/
         ├── defaults/main.yml
         ├── tasks/main.yml
@@ -88,12 +105,15 @@ homelab-ansible/
 | [playbooks/site.yml](playbooks/site.yml) | Top-level entry point importing focused playbooks. |
 | [playbooks/docker_hosts.yml](playbooks/docker_hosts.yml) | Targets `docker_hosts` and invokes the reusable `docker_host` role. |
 | [playbooks/semaphore.yml](playbooks/semaphore.yml) | Explicit controller bootstrap/deployment entry point. Intentionally not imported by `site.yml` to avoid unintended controller changes or self-management. |
+| [playbooks/service_smoke_test.yml](playbooks/service_smoke_test.yml) | Explicit, test-host-only Compose smoke workload. Not imported by `site.yml`; live execution requires separate approval. |
 | [roles/semaphore_controller/](roles/semaphore_controller/) | Pinned Compose deployment, persistent SQLite/config storage, protected secret-file preflight, host-key trust, and loopback health checks. |
+| [roles/docker_compose_service/](roles/docker_compose_service/) | Reusable Compose project deployment with input validation, protected project-file permissions, optional teardown, and orphan preservation. |
 | [roles/docker_host/defaults/main.yml](roles/docker_host/defaults/main.yml) | Low-precedence, overridable, non-secret role defaults. |
 | [roles/docker_host/tasks/main.yml](roles/docker_host/tasks/main.yml) | OS and migration guards, repository trust, package presence, and Docker service state. |
 | [roles/docker_host/handlers/main.yml](roles/docker_host/handlers/main.yml) | Refreshes APT metadata when the managed repository or signing key changes. Does not restart Docker. |
 | [roles/docker_host/templates/](roles/docker_host/templates/) | Role-owned Jinja2 templates. Secret values must come from protected runtime variables, not template source. |
 | [roles/docker_host/files/](roles/docker_host/files/) | Role-owned static, non-secret files. Never place private keys or credentials here. |
+| [roles/docker_compose_service/tasks/main.yml](roles/docker_compose_service/tasks/main.yml) | Validates project inputs, writes a root-managed Compose file, and converges or removes only the named project without deleting orphans or volumes. |
 | [ansible.cfg](ansible.cfg) | Default inventory, role and project-local collection paths, enabled SSH host-key checking, and disabled retry files. |
 | [requirements.yml](requirements.yml) | Pins `community.docker` 5.4.0 for Compose management. External roles remain empty. |
 | [.gitignore](.gitignore) | Local secrets, overrides, generated files, Python environments, editor metadata, macOS files, and temporary-file exclusions. |
@@ -107,8 +127,9 @@ by Ansible. Empty inventory variable mappings are intentional placeholders.
 Keep inventory separate from roles. Roles must not contain host addresses,
 inventory-specific host names, or credentials. Put reusable defaults in the
 role, shared environment configuration in `group_vars`, and host-specific
-overrides in `host_vars`. Use a `docker_host_` prefix for future role variables
-to reduce naming collisions.
+overrides in `host_vars`. Use a `docker_host_` prefix for Docker host variables
+and a `docker_compose_service_` prefix for Compose service variables to reduce
+naming collisions.
 
 Templates and static files belong inside the role that owns them; there are no
 ambiguous repository-wide template or file directories.
@@ -767,6 +788,37 @@ through Semaphore. Independent key-only SSH checks afterward confirmed Docker
 active and enabled, Engine 29.9.2, Compose 5.6.1, and no running containers.
 Earlier check-mode success alone did not verify root privileges for actual APT
 operations. Fresh-host installation and arm64 runtime testing remain unverified.
+
+### Compose service deployment foundation
+
+The reusable `docker_compose_service` role validates each project's name,
+`/opt/<project>` path, Compose services, state, and health-wait timeout. It
+manages a root-owned Compose file and uses the pinned `community.docker`
+collection to converge or remove only that Compose project; it does not remove
+orphan containers or volumes.
+
+[playbooks/service_smoke_test.yml](playbooks/service_smoke_test.yml) is a
+test-only example targeting `docker-test-01`. It runs a pinned BusyBox
+container without published ports, persistent volumes, or credentials. The
+playbook is not included in [site.yml](playbooks/site.yml). This change has
+only been validated locally; no host was contacted and no container was
+deployed. Do not apply it until the separate live-deployment approval.
+
+Validate the playbook locally with:
+
+```sh
+.venv/bin/ansible-playbook playbooks/service_smoke_test.yml --syntax-check
+.venv/bin/ansible-playbook playbooks/service_smoke_test.yml --list-tasks
+```
+
+For real services, select one service per capability, set an explicit target
+host, pin image versions, and define health checks, ports, persistence, backup,
+and recovery before deployment. Keep credentials out of the Compose
+configuration and use protected file-backed/runtime inputs. The inventory
+sheet's service status and device assignment fields are currently blank, so
+reconcile those with existing VMs before selecting production targets. The
+smoke-test project can be removed, after approval, by rerunning the same
+playbook with `-e docker_compose_service_state=absent`.
 
 Work in small, approved stages and verify each stage before moving on:
 

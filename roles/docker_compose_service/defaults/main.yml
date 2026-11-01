@@ -1,0 +1,6 @@
+---
+docker_compose_service_project_name: ''
+docker_compose_service_project_src: ''
+docker_compose_service_config: {}
+docker_compose_service_state: present
+docker_compose_service_wait_timeout: 120
